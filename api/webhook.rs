@@ -1,13 +1,11 @@
 use serde::Deserialize;
 use serde_json::json;
-// 2.x sürümünde Body ve StatusCode artık 'vercel_runtime::http' altından gelir
 use vercel_runtime::{
-    http::{Body, StatusCode},
-    run, Error, Request, Response,
+    http::{StatusCode, Response},
+    run, Error, Request, ResponseBody, ServiceFn,
 };
 
 // --- KONFİGÜRASYON ---
-// Engellemek istediğiniz kişilerin Telegram ID numaraları
 const TARGET_USER_IDS: &[i64] = &[123456789, 987654321]; 
 
 // --- TELEGRAM JSON MODELLERİ ---
@@ -48,41 +46,49 @@ struct MessageEntity {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    run(handler).await
+    // Vercel 2.2.0 bizden handler fonksiyonunu bir ServiceFn içine sarmalamamızı bekliyor
+    run(ServiceFn::new(handler)).await
 }
 
-pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
-    // Sadece POST isteklerini kabul et
+pub async fn handler(req: Request) -> Result<Response<ResponseBody>, Error> {
+    // 1. Sadece POST isteklerini kabul et
     if req.method() != "POST" {
         return Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(Body::Empty)?);
+            .body(ResponseBody::empty())?);
     }
 
-    let body_bytes = req.into_body();
+    // 2. Hatayı Çözen Kritik Kısım: Gelen hyper::body::Incoming stream'ini byte dizisine topluyoruz
+    let body_bytes = match vercel_runtime::into_bytes(req.into_body()).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(ResponseBody::from("Gövde okunamadı"))?);
+        }
+    };
+
+    // 3. JSON Ayrıştırma
     let update: Update = match serde_json::from_slice(&body_bytes) {
         Ok(up) => up,
         Err(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("Invalid JSON"))?); // 2.x mimarisine uygun Body oluşturma
+                .body(ResponseBody::from("Geçersiz JSON"))?);
         }
     };
 
+    // 4. Bot Mantığı (Link Kontrolü ve Silme)
     if let Some(msg) = update.message {
         if let Some(from_user) = &msg.from {
-            // 1. Adım: Mesajı atan kişi hedef listede mi?
             if TARGET_USER_IDS.contains(&from_user.id) {
                 let mut contains_invite_link = false;
 
-                // Hem normal metindeki hem de medyanın caption kısmındaki entity'leri tara
                 let mut all_entities = Vec::new();
                 if let Some(mut e) = msg.entities { all_entities.append(&mut e); }
                 if let Some(mut ce) = msg.caption_entities { all_entities.append(&mut ce); }
 
-                // 2. Adım: Entity türlerini ve içeriklerini kontrol et
                 for entity in all_entities {
-                    // Durum A: Direkt text olarak "t.me/+" veya "t.me/joinchat" yazılmışsa (url)
                     if entity.entity_type == "url" {
                         if let Some(text_content) = get_entity_text(&msg, entity.offset, entity.length) {
                             if is_invite_link(&text_content) {
@@ -90,9 +96,7 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
                                 break;
                             }
                         }
-                    }
-                    // Durum B: Bir kelimeye veya emojiye link gömülmüşse (text_link)
-                    else if entity.entity_type == "text_link" {
+                    } else if entity.entity_type == "text_link" {
                         if let Some(url) = entity.url {
                             if is_invite_link(&url) {
                                 contains_invite_link = true;
@@ -102,7 +106,6 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
                     }
                 }
 
-                // Eğer link bulunduysa Telegram API'ye silme isteği gönder
                 if contains_invite_link {
                     if let Ok(bot_token) = std::env::var("TELEGRAM_BOT_TOKEN") {
                         let client = reqwest::Client::new();
@@ -121,22 +124,19 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
         }
     }
 
-    // Vercel serverless fonksiyonunun başarıyla sonlanması için 200 OK dönüyoruz
+    // Sorunsuz bittiğinde 200 OK dönüyoruz
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .body(Body::from("OK"))?) // 2.x mimarisine uygun Body oluşturma
+        .body(ResponseBody::from("OK"))?)
 }
 
-/// Gelen URL veya metnin Telegram davet linki formatında olup olmadığını kontrol eder.
 fn is_invite_link(text: &str) -> bool {
     let lower = text.to_lowercase();
     lower.contains("t.me/joinchat") || lower.contains("t.me/+")
 }
 
-/// UTF-16 tabanlı Telegram offset değerlerine göre metinden ilgili entity kısmını güvenli bir şekilde keser.
 fn get_entity_text(msg: &Message, offset: usize, length: usize) -> Option<String> {
     let target_text = msg.text.as_ref().or(msg.caption.as_ref())?;
-    
     let utf16: Vec<u16> = target_text.encode_utf16().collect();
     if offset + length <= utf16.len() {
         String::from_utf16(&utf16[offset..offset + length]).ok()
