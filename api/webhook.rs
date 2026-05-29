@@ -4,7 +4,7 @@ use vercel_runtime::{run, Body, Error, Request, Response, StatusCode};
 
 // --- KONFİGÜRASYON ---
 // Engellemek istediğiniz kişilerin Telegram ID numaraları
-const TARGET_USER_IDS: &[i64] = &[123456789, 987654321]; 
+const TARGET_USER_IDS: &[i64] = &[7350150331, 987654321]; 
 
 // --- TELEGRAM JSON MODELLERİ ---
 #[derive(Deserialize, Debug)]
