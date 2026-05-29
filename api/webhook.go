@@ -12,7 +12,7 @@ import (
 	"unicode/utf16"
 )
 
-var targetUserIDs = []int64{7350150331, 8135840643}
+var targetUserIDs = []int64{7350150331, 987654321}
 
 var httpClient = &http.Client{
 	Transport: &http.Transport{
@@ -28,7 +28,6 @@ var updatePool = sync.Pool{
 	},
 }
 
-// --- TELEGRAM MİNİMAL JSON MODELLERİ ---
 type MessageEntity struct {
 	Type   string `json:"type"`
 	URL    string `json:"url,omitempty"`
@@ -61,6 +60,15 @@ type Update struct {
 func Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte("Sadece POST istekleri kabul edilir."))
+		return
+	}
+
+	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
+	if botToken == "" {
+		// TELEGRAM_BOT_TOKEN okunamazsa Vercel loglarında kabak gibi 500 hatası göreceğiz
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("HATA: TELEGRAM_BOT_TOKEN yuklenemedi!"))
 		return
 	}
 
@@ -70,16 +78,17 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	err := json.NewDecoder(r.Body).Decode(update)
 	if err != nil {
 		updatePool.Put(update)
+		// JSON parse edilemezse 400 hatası göreceğiz
 		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte("HATA: JSON cozulemedi."))
 		return
 	}
 
 	if update.Message != nil {
 		msg := update.Message
-		botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 
 		// --- GEÇİCİ TEST: /start KOMUTU KONTROLÜ ---
-		if msg.Text == "/start" && botToken != "" {
+		if msg.Text == "/start" {
 			go sendOkResponse(botToken, msg.Chat.ID)
 		}
 
@@ -105,7 +114,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 					containsLink = checkEntities(msg, msg.CaptionEntities)
 				}
 
-				if containsLink && botToken != "" {
+				if containsLink {
 					go deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
 				}
 			}
@@ -204,7 +213,6 @@ func deleteMessage(token string, chatID int64, messageID int64) {
 	}
 }
 
-// --- GEÇİCİ TEST FONKSİYONU: ÖZELDEN CEVAP VERME ---
 func sendOkResponse(token string, chatID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
