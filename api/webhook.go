@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -84,7 +85,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("HAM TELEGRAM VERISI: %s", string(bodyBytes))
 
 	// JSON Decoder'ın okuyabilmesi için body'yi yeniden dolduruyoruz
-	r.Body = http.MaxBytesReader(w, bytes.NewReader(bodyBytes), 1048576)
+r.Body = http.MaxBytesReader(w, io.NopCloser(bytes.NewReader(bodyBytes)), 1048576)
 
 	update := updatePool.Get().(*Update)	
 	update.Message = nil 
