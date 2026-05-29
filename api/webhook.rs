@@ -1,9 +1,6 @@
 use serde::Deserialize;
 use serde_json::json;
-use vercel_runtime::{
-    http::{StatusCode, Response},
-    run, Error, Request, ResponseBody, ServiceFn,
-};
+use vercel_runtime::{run, Error, Request, Response, Body, StatusCode};
 
 // --- KONFİGÜRASYON ---
 const TARGET_USER_IDS: &[i64] = &[123456789, 987654321]; 
@@ -46,25 +43,26 @@ struct MessageEntity {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Vercel 2.2.0 bizden handler fonksiyonunu bir ServiceFn içine sarmalamamızı bekliyor
-    run(ServiceFn::new(handler)).await
+    // Karmaşık ServiceFn yapıları yerine doğrudan handler fonksiyonumuzu çalıştırıyoruz
+    run(handler).await
 }
 
-pub async fn handler(req: Request) -> Result<Response<ResponseBody>, Error> {
+pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
     // 1. Sadece POST isteklerini kabul et
     if req.method() != "POST" {
         return Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(ResponseBody::empty())?);
+            .body(Body::Empty)?);
     }
 
-    // 2. Hatayı Çözen Kritik Kısım: Gelen hyper::body::Incoming stream'ini byte dizisine topluyoruz
-    let body_bytes = match vercel_runtime::into_bytes(req.into_body()).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
+    // 2. Gövdeyi (Body) okuma işlemini 'vercel_runtime::Body' üzerinden yapıyoruz
+    let body_bytes = match req.into_body() {
+        Body::Binary(bytes) => bytes,
+        Body::Text(text) => text.into_bytes(),
+        Body::Empty => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(ResponseBody::from("Gövde okunamadı"))?);
+                .body(Body::Text("Empty body".into()))?);
         }
     };
 
@@ -74,7 +72,7 @@ pub async fn handler(req: Request) -> Result<Response<ResponseBody>, Error> {
         Err(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(ResponseBody::from("Geçersiz JSON"))?);
+                .body(Body::Text("Invalid JSON".into()))?);
         }
     };
 
@@ -124,10 +122,10 @@ pub async fn handler(req: Request) -> Result<Response<ResponseBody>, Error> {
         }
     }
 
-    // Sorunsuz bittiğinde 200 OK dönüyoruz
+    // Başarılı tamamlama yanıtı
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .body(ResponseBody::from("OK"))?)
+        .body(Body::Text("OK".into()))?)
 }
 
 fn is_invite_link(text: &str) -> bool {
