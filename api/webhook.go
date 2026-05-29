@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 	"unicode/utf16"
 )
@@ -16,26 +15,19 @@ import (
 // Gruplarda linkleri silinecek hedef kişilerin ID'leri
 var targetUserIDs = []int64{7350150331, 987654321}
 
-// Bağlantı havuzu: TCP tünellerini sıcak tutarak anlık tepki süresini garantiler
+// TCP tünellerini sıcak tutarak cold start sonrası tepki süresini milisaniyelere düşürür
 var httpClient = &http.Client{
 	Transport: &http.Transport{
-		MaxIdleConns:        10,
-		MaxIdleConnsPerHost: 10,
+		MaxIdleConns:        15,
+		MaxIdleConnsPerHost: 15,
 		IdleConnTimeout:     90 * time.Second,
 	},
 }
 
-// Bellek dostu Update havuzu: Her webhook isteğinde yeniden struct yaratılmasını engeller
-var updatePool = sync.Pool{
-	New: func() interface{} {
-		return &Update{}
-	},
-}
-
-// --- MİNİMAL MODELLER ---
+// --- MİNİMAL JSON MODELLERİ (Zero-Overhead için sadece gerekli alanlar) ---
 type MessageEntity struct {
-	Type    string `json:"type"`
-	URL     string `json:"url,omitempty"`
+	Type   string `json:"type"`
+	URL    string `json:"url,omitempty"`
 	Offset int    `json:"offset"`
 	Length int    `json:"length"`
 }
@@ -76,80 +68,69 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. ADIM: Telegram'ı bekletmemek için OK cevabını anında gönderiyoruz.
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
+	// Sıfır bellek yükü için doğrudan Request Body'den akış şeklinde decode ediyoruz
+	var update Update
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 
-	// 2. ADIM: Vercel'in r.Body'yi hemen temizlememesi için veriyi belleğe kopyalıyoruz.
-	bodyBuf := new(bytes.Buffer)
-	bodyBuf.ReadFrom(r.Body)
-	r.Body.Close()
-	reqBody := bodyBuf.Bytes()
+	if update.Message != nil {
+		msg := update.Message
 
-	// 3. ADIM: Tüm işleme ve silme mantığını tek bir Goroutine içinde asenkron yürütüyoruz.
-	go func(data []byte) {
-		update := updatePool.Get().(*Update)
-		update.Message = nil
+		// Sadece grup ve süpergrupları filtrele
+		if msg.Chat.Type == "group" || msg.Chat.Type == "supergroup" {
+			if msg.From != nil {
+				userID := msg.From.ID
 
-		err := json.Unmarshal(data, update)
-		if err != nil {
-			updatePool.Put(update)
-			return
-		}
+				// Hedef kullanıcı kontrolü (Performans için düz döngü)
+				isTarget := false
+				for i := 0; i < len(targetUserIDs); i++ {
+					if targetUserIDs[i] == userID {
+						isTarget = true
+						break
+					}
+				}
 
-		if update.Message != nil {
-			msg := update.Message
+				if isTarget {
+					containsLink := false
 
-			// GRUP İÇİ LİNK DENETİMİ (Yalnızca grup ve süpergruplar işlenir)
-			if msg.Chat.Type == "group" || msg.Chat.Type == "supergroup" {
-				if msg.From != nil {
-					userID := msg.From.ID
-
-					isTarget := false
-					for i := 0; i < len(targetUserIDs); i++ {
-						if targetUserIDs[i] == userID {
-							isTarget = true
-							break
-						}
+					// 1. Durum: Düz metin içindeki linkler (Entities)
+					if len(msg.Entities) > 0 {
+						containsLink = checkEntities(msg, msg.Entities)
+					}
+					// 2. Durum: Medya altındaki açıklamalar (Caption Entities)
+					if !containsLink && len(msg.CaptionEntities) > 0 {
+						containsLink = checkEntities(msg, msg.CaptionEntities)
 					}
 
-					if isTarget {
-						containsLink := false
-
-						// Normal metin içindeki linkleri (entities) veya hypertextleri tarar
-						if len(msg.Entities) > 0 {
-							containsLink = checkEntities(msg, msg.Entities)
-						}
-						// Medya dosyalarının altındaki açıklamaları (caption) tarar
-						if !containsLink && len(msg.CaptionEntities) > 0 {
-							containsLink = checkEntities(msg, msg.CaptionEntities)
-						}
-
-						// Link yakalandıysa, mesajı imha et
-						if containsLink {
-							deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
-						}
+					// Link tespit edildiyse, Vercel süreci dondurmadan ÖNCE senkron olarak sil
+					if containsLink {
+						deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
 					}
 				}
 			}
 		}
-		updatePool.Put(update)
-	}(reqBody)
+	}
+
+	// Vercel'e işimizin bittiğini ve her şeyin başarılı olduğunu bildiriyoruz
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 }
 
-// --- TARAMA VE ANALİZ MOTORLARI ---
+// --- TARAMA VE ANALİZ MOTORU ---
 func checkEntities(msg *Message, entities []MessageEntity) bool {
 	for i := 0; i < len(entities); i++ {
 		entity := entities[i]
 		
-		// Düz metin halindeki link (Örn: t.me/joinchat/...)
+		// Normal URL (t.me/...)
 		if entity.Type == "url" {
 			textContent := getEntityText(msg, entity.Offset, entity.Length)
 			if isInviteLink(textContent) {
 				return true
 			}
 		} else if entity.Type == "text_link" {
-			// Hypertext formatındaki gizli link (Örn: [Tıklayın](t.me/...))
+			// Maskelenmiş Hypertext linkler ([Tıkla](t.me/...))
 			if isInviteLink(entity.URL) {
 				return true
 			}
@@ -158,7 +139,7 @@ func checkEntities(msg *Message, entities []MessageEntity) bool {
 	return false
 }
 
-// Telegram entity'leri UTF-16 indeksleri kullandığı için kesin karakter kesimi yapar
+// Telegram'ın UTF-16 indeksleme standardıyla %100 uyumlu güvenli kesim fonksiyonu
 func getEntityText(msg *Message, offset, length int) string {
 	text := msg.Text
 	if text == "" {
@@ -175,7 +156,7 @@ func getEntityText(msg *Message, offset, length int) string {
 	return ""
 }
 
-// Demode olan telegram.me gibi yapıları atlar, sadece "t.me/" yapısını arayarak maksimum hız sağlar
+// Regex kullanmadan, bellek harcamadan (O(n)) çalışan t.me/ analizörü
 func isInviteLink(text string) bool {
 	n := len(text)
 	if n < 5 {
@@ -188,17 +169,19 @@ func isInviteLink(text string) bool {
 			(text[i+2] == 'm' || text[i+2] == 'M') &&
 			(text[i+3] == 'e' || text[i+3] == 'E') &&
 			(text[i+4] == '/') {
-			return true // t.me/ yapısı tespit edildiği an tetiklenir
+			return true
 		}
 	}
 	return false
 }
 
-// --- TELEGRAM API İŞLEMLERİ ---
+// --- TELEGRAM API SİLME İŞLEMİ (SENKRON) ---
 func deleteMessage(token string, chatID int64, messageID int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Vercel'in ağı kesmemesi için 4 saniyelik güvenli bir pencere açıyoruz
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 
+	// String birleştirmelerinde heap allocation yapmamak için buffer kullanımı
 	var urlBuf bytes.Buffer
 	urlBuf.WriteString("https://api.telegram.org/bot")
 	urlBuf.WriteString(token)
