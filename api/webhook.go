@@ -34,8 +34,8 @@ var updatePool = sync.Pool{
 
 // --- MİNİMAL MODELLER ---
 type MessageEntity struct {
-	Type   string `json:"type"`
-	URL    string `json:"url,omitempty"`
+	Type    string `json:"type"`
+	URL     string `json:"url,omitempty"`
 	Offset int    `json:"offset"`
 	Length int    `json:"length"`
 }
@@ -76,56 +76,67 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	update := updatePool.Get().(*Update)
-	update.Message = nil
+	// 1. ADIM: Telegram'ı bekletmemek için OK cevabını anında gönderiyoruz.
+	// Böylece Telegram sıradaki mesajları geciktirmeden göndermeye devam eder.
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
 
-	err := json.NewDecoder(r.Body).Decode(update)
-	if err != nil {
-		updatePool.Put(update)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
+	// 2. ADIM: Vercel'in r.Body'yi hemen temizlememesi için veriyi belleğe kopyalıyoruz.
+	buf := updatePool.Get().(*Update) // Geçici buffer havuzunu JSON decode için değil, asenkron taşıma için de optimize edebiliriz ama en temiz yol body okumaktır.
+	bodyBuf := new(bytes.Buffer)
+	bodyBuf.ReadFrom(r.Body)
+	r.Body.Close()
+	reqBody := bodyBuf.Bytes()
 
-	if update.Message != nil {
-		msg := update.Message
+	// 3. ADIM: Tüm işleme ve silme mantığını tek bir Goroutine içinde asenkron yürütüyoruz.
+	go func(data []byte) {
+		update := updatePool.Get().(*Update)
+		update.Message = nil
 
-		// GRUP İÇİ LİNK DENETİMİ (Yalnızca grup ve süpergruplar işlenir)
-		if msg.Chat.Type == "group" || msg.Chat.Type == "supergroup" {
-			if msg.From != nil {
-				userID := msg.From.ID
+		err := json.Unmarshal(data, update)
+		if err != nil {
+			updatePool.Put(update)
+			return
+		}
 
-				isTarget := false
-				for i := 0; i < len(targetUserIDs); i++ {
-					if targetUserIDs[i] == userID {
-						isTarget = true
-						break
+		if update.Message != nil {
+			msg := update.Message
+
+			// GRUP İÇİ LİNK DENETİMİ (Yalnızca grup ve süpergruplar işlenir)
+			if msg.Chat.Type == "group" || msg.Chat.Type == "supergroup" {
+				if msg.From != nil {
+					userID := msg.From.ID
+
+					isTarget := false
+					for i := 0; i < len(targetUserIDs); i++ {
+						if targetUserIDs[i] == userID {
+							isTarget = true
+							break
+						}
 					}
-				}
 
-				if isTarget {
-					containsLink := false
+					if isTarget {
+						containsLink := false
 
-					// Normal metin içindeki linkleri (entities) veya hypertextleri tarar
-					if len(msg.Entities) > 0 {
-						containsLink = checkEntities(msg, msg.Entities)
-					}
-					// Medya dosyalarının altındaki açıklamaları (caption) tarar
-					if !containsLink && len(msg.CaptionEntities) > 0 {
-						containsLink = checkEntities(msg, msg.CaptionEntities)
-					}
+						// Normal metin içindeki linkleri (entities) veya hypertextleri tarar
+						if len(msg.Entities) > 0 {
+							containsLink = checkEntities(msg, msg.Entities)
+						}
+						// Medya dosyalarının altındaki açıklamaları (caption) tarar
+						if !containsLink && len(msg.CaptionEntities) > 0 {
+							containsLink = checkEntities(msg, msg.CaptionEntities)
+						}
 
-					// Link yakalandıysa, mesajı anında arka planda imha et
-					if containsLink {
-						go deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
+						// Link yakalandıysa, mesajı imha et (Zaten arka planda olduğumuz için tekrar 'go' demeye gerek yok)
+						if containsLink {
+							deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
+						}
 					}
 				}
 			}
 		}
-	}
-
-	updatePool.Put(update)
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK")) // Telegram'ı bekletmemek için anında 200 OK
+		updatePool.Put(update)
+	}(reqBody)
 }
 
 // --- TARAMA VE ANALİZ MOTORLARI ---
@@ -187,7 +198,7 @@ func isInviteLink(text string) bool {
 
 // --- TELEGRAM API İŞLEMLERİ ---
 func deleteMessage(token string, chatID int64, messageID int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // Vercel ortamı için timeout'u 5 saniyeye esnetiyoruz
 	defer cancel()
 
 	var urlBuf bytes.Buffer
