@@ -12,7 +12,7 @@ import (
 	"unicode/utf16"
 )
 
-var targetUserIDs = []int64{7350150331, 987654321}
+var targetUserIDs = []int64{7350150331, 115180296, 8135840643}
 
 // OPTİMİZASYON 1: Global HTTP Client ve Bağlantı Havuzu Havuzu
 // MaxIdleConnsPerHost sayesinde Telegram sunucularıyla TCP bağlantısı hep sıcak tutulur.
