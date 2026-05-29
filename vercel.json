@@ -3,7 +3,10 @@
   "builds": [
     {
       "src": "api/webhook.go",
-      "use": "@vercel/go"
+      "use": "@vercel/go",
+      "config": {
+        "goFlags": "-ldflags=\"-s -w\""
+      }
     }
   ],
   "routes": [
