@@ -8,5 +8,11 @@
         "goFlags": "-ldflags='-s -w'"
       }
     }
+  ],
+  "routes": [
+    {
+      "src": "/api/webhook",
+      "dest": "/api/webhook.go"
+    }
   ]
 }
