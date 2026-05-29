@@ -1,11 +1,7 @@
 use serde::Deserialize;
 use serde_json::json;
-// Vercel'in tam imza için beklediği tüm alt tipleri resmi yollarından içeri alıyoruz
-use vercel_runtime::{
-    run, AppState, Error, Request, Response, ResponseBody, ServiceFn,
-};
-// HTTP durum kodları için reqwest'in de arkada kullandığı standart 'http' crate'inden besleniyoruz
-use vercel_runtime::http::StatusCode;
+// Eski/Kararlı mimaride her şey direkt olarak kökten dışa aktarılır
+use vercel_runtime::{run, Body, Error, Request, Response, StatusCode};
 
 // --- KONFİGÜRASYON ---
 const TARGET_USER_IDS: &[i64] = &[123456789, 987654321]; 
@@ -48,31 +44,23 @@ struct MessageEntity {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    // Derleyicinin aradığı ServiceFn sarmalamasını vercel_runtime içerisinden temizce yapıyoruz
-    run(ServiceFn::new(handler)).await
+    // En temel çalıştırma yöntemi
+    run(handler).await
 }
 
-// Hatanın çözüldüğü asıl yer: İmzada artık Vercel'in zorunlu tuttuğu 'AppState' parametresi var
-pub async fn handler(
-    _state: AppState, 
-    req: Request
-) -> Result<Response<ResponseBody>, Error> {
-    
+pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
     // 1. Sadece POST isteklerini kabul et
     if req.method() != "POST" {
         return Ok(Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(ResponseBody::empty())?);
+            .body(Body::Empty)?);
     }
 
-    // 2. Gelen gövde akışını (stream) byte dizisine topluyoruz
-    let body_bytes = match vercel_runtime::into_bytes(req.into_body()).await {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(ResponseBody::from("Gövde okunamadı"))?);
-        }
+    // 2. Body tipini güvenli bir byte vektörüne (Vec<u8>) dönüştürüyoruz
+    let body_bytes = match req.into_body() {
+        Body::Binary(bytes) => bytes,
+        Body::Text(text) => text.into_bytes(),
+        Body::Empty => Vec::new(),
     };
 
     // 3. JSON Ayrıştırma
@@ -81,7 +69,7 @@ pub async fn handler(
         Err(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(ResponseBody::from("Geçersiz JSON"))?);
+                .body(Body::Text("Invalid JSON".into()))?);
         }
     };
 
@@ -131,10 +119,10 @@ pub async fn handler(
         }
     }
 
-    // Başarıyla sonlandığında dönülecek 200 OK yanıtı
+    // 200 OK yanıtı
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .body(ResponseBody::from("OK"))?)
+        .body(Body::Text("OK".into()))?)
 }
 
 fn is_invite_link(text: &str) -> bool {
