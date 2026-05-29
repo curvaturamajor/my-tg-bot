@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -60,39 +61,51 @@ type Update struct {
 func Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
-		w.Write([]byte("Sadece POST istekleri kabul edilir."))
 		return
 	}
 
 	botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 	if botToken == "" {
-		// TELEGRAM_BOT_TOKEN okunamazsa Vercel loglarında kabak gibi 500 hatası göreceğiz
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("HATA: TELEGRAM_BOT_TOKEN yuklenemedi!"))
+		w.Write([]byte("HATA: Token Yok"))
 		return
 	}
+
+	// --- TEŞHİS: HAM JSON VERİSİNİ OKUMA VE LOGLAMA ---
+	// İstek gövdesini (body) okuyoruz
+	var bodyBytes []byte
+	if r.Body != nil {
+		buf := new(bytes.Buffer)
+		buf.ReadFrom(r.Body)
+		bodyBytes = buf.Bytes()
+	}
+
+	// Okuduğumuz veriyi Vercel loguna basıyoruz
+	log.Printf("HAM TELEGRAM VERISI: %s", string(bodyBytes))
+
+	// JSON Decoder'ın okuyabilmesi için body'yi yeniden dolduruyoruz
+	r.Body = http.MaxBytesReader(w, bytes.NewReader(bodyBytes), 1048576)
 
 	update := updatePool.Get().(*Update)	
 	update.Message = nil 
 
-	err := json.NewDecoder(r.Body).Decode(update)
+	// Ham veriyi çözmeyi dene
+	err := json.Unmarshal(bodyBytes, update)
 	if err != nil {
 		updatePool.Put(update)
-		// JSON parse edilemezse 400 hatası göreceğiz
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("HATA: JSON cozulemedi."))
+		w.WriteHeader(http.StatusOK) // Telegram'ı susturmak için 200 dönüyoruz
 		return
 	}
 
 	if update.Message != nil {
 		msg := update.Message
 
-		// --- GEÇİCİ TEST: /start KOMUTU KONTROLÜ ---
+		// /start Kontrolü
 		if msg.Text == "/start" {
 			go sendOkResponse(botToken, msg.Chat.ID)
 		}
 
-		// --- ORİJİNAL LİNK SİLME MANTIĞI ---
+		// Link Silme Kontrolü
 		if msg.From != nil {
 			userID := msg.From.ID
 
@@ -161,22 +174,34 @@ func getEntityText(msg *Message, offset, length int) string {
 
 func isInviteLink(text string) bool {
 	n := len(text)
-	if n < 6 { 
+	if n < 5 { 
 		return false
 	}
 
-	for i := 1; i < n-3; i++ {
-		if text[i] == '.' {
-			if (text[i-1] == 't' || text[i-1] == 'T') &&
-				(text[i+1] == 'm' || text[i+1] == 'M') &&
-				(text[i+2] == 'e' || text[i+2] == 'E') &&
-				(text[i+3] == '/') {
-				
-				rem := text[i+4:]
-				if len(rem) >= 8 && (rem[:8] == "joinchat" || rem[:8] == "JOINCHAT") {
+	for i := 0; i <= n-5; i++ {
+		if (text[i] == 't' || text[i] == 'T') &&
+			(text[i+1] == '.') &&
+			(text[i+2] == 'm' || text[i+2] == 'M') &&
+			(text[i+3] == 'e' || text[i+3] == 'E') &&
+			(text[i+4] == '/') {
+			
+			remaining := text[i+5:]
+			
+			for j := 0; j <= len(remaining)-8; j++ {
+				if (remaining[j] == 'j' || remaining[j] == 'J') &&
+					(remaining[j+1] == 'o' || remaining[j+1] == 'O') &&
+					(remaining[j+2] == 'i' || remaining[j+2] == 'I') &&
+					(remaining[j+3] == 'n' || remaining[j+3] == 'N') &&
+					(remaining[j+4] == 'c' || remaining[j+4] == 'C') &&
+					(remaining[j+5] == 'h' || remaining[j+5] == 'H') &&
+					(remaining[j+6] == 'a' || remaining[j+6] == 'A') &&
+					(remaining[j+7] == 't' || remaining[j+7] == 'T') {
 					return true
 				}
-				if len(rem) > 0 && rem[0] == '+' {
+			}
+
+			for j := 0; j < len(remaining); j++ {
+				if remaining[j] == '+' {
 					return true
 				}
 			}
