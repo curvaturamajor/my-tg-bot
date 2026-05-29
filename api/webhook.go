@@ -77,12 +77,10 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. ADIM: Telegram'ı bekletmemek için OK cevabını anında gönderiyoruz.
-	// Böylece Telegram sıradaki mesajları geciktirmeden göndermeye devam eder.
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 
 	// 2. ADIM: Vercel'in r.Body'yi hemen temizlememesi için veriyi belleğe kopyalıyoruz.
-	buf := updatePool.Get().(*Update) // Geçici buffer havuzunu JSON decode için değil, asenkron taşıma için de optimize edebiliriz ama en temiz yol body okumaktır.
 	bodyBuf := new(bytes.Buffer)
 	bodyBuf.ReadFrom(r.Body)
 	r.Body.Close()
@@ -127,7 +125,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 							containsLink = checkEntities(msg, msg.CaptionEntities)
 						}
 
-						// Link yakalandıysa, mesajı imha et (Zaten arka planda olduğumuz için tekrar 'go' demeye gerek yok)
+						// Link yakalandıysa, mesajı imha et
 						if containsLink {
 							deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
 						}
@@ -198,7 +196,7 @@ func isInviteLink(text string) bool {
 
 // --- TELEGRAM API İŞLEMLERİ ---
 func deleteMessage(token string, chatID int64, messageID int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second) // Vercel ortamı için timeout'u 5 saniyeye esnetiyoruz
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var urlBuf bytes.Buffer
