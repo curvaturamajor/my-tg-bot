@@ -12,10 +12,8 @@ import (
 	"unicode/utf16"
 )
 
-var targetUserIDs = []int64{7350150331, 115180296, 8135840643}
+var targetUserIDs = []int64{7350150331, 8135840643}
 
-// OPTİMİZASYON 1: Global HTTP Client ve Bağlantı Havuzu Havuzu
-// MaxIdleConnsPerHost sayesinde Telegram sunucularıyla TCP bağlantısı hep sıcak tutulur.
 var httpClient = &http.Client{
 	Transport: &http.Transport{
 		MaxIdleConns:        100,
@@ -76,37 +74,44 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if update.Message != nil && update.Message.From != nil {
-		userID := update.Message.From.ID
+	if update.Message != nil {
+		msg := update.Message
+		botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 
-		isTarget := false
-		for i := 0; i < len(targetUserIDs); i++ {
-			if targetUserIDs[i] == userID {
-				isTarget = true
-				break
-			}
+		// --- GEÇİCİ TEST: /start KOMUTU KONTROLÜ ---
+		if msg.Text == "/start" && botToken != "" {
+			go sendOkResponse(botToken, msg.Chat.ID)
 		}
 
-		if isTarget {
-			msg := update.Message
-			containsLink := false
+		// --- ORİJİNAL LİNK SİLME MANTIĞI ---
+		if msg.From != nil {
+			userID := msg.From.ID
 
-			if len(msg.Entities) > 0 {
-				containsLink = checkEntities(msg, msg.Entities)
-			}
-			if !containsLink && len(msg.CaptionEntities) > 0 {
-				containsLink = checkEntities(msg, msg.CaptionEntities)
+			isTarget := false
+			for i := 0; i < len(targetUserIDs); i++ {
+				if targetUserIDs[i] == userID {
+					isTarget = true
+					break
+				}
 			}
 
-			if containsLink {
-				botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
-				if botToken != "" {
-					// Arka plan goroutine'ine geçiyoruz
+			if isTarget {
+				containsLink := false
+
+				if len(msg.Entities) > 0 {
+					containsLink = checkEntities(msg, msg.Entities)
+				}
+				if !containsLink && len(msg.CaptionEntities) > 0 {
+					containsLink = checkEntities(msg, msg.CaptionEntities)
+				}
+
+				if containsLink && botToken != "" {
 					go deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
 				}
 			}
 		}
 	}
+
 	updatePool.Put(update)
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
@@ -145,24 +150,19 @@ func getEntityText(msg *Message, offset, length int) string {
 	return ""
 }
 
-// OPTİMİZASYON 3: Keskin Nokta Taramalı Zero-Allocation Link Kontrolü
 func isInviteLink(text string) bool {
 	n := len(text)
 	if n < 6 { 
 		return false
 	}
 
-	// Tüm string'i 5'erli bloklar halinde taramak yerine, önce '.' avlıyoruz.
-	// Bu işlemci seviyesindeki arama döngüsünü inanılmaz hızlandırır.
 	for i := 1; i < n-3; i++ {
 		if text[i] == '.' {
-			// Noktanın solunda 't' veya 'T', sağında 'm' ve 'e' var mı?
 			if (text[i-1] == 't' || text[i-1] == 'T') &&
 				(text[i+1] == 'm' || text[i+1] == 'M') &&
 				(text[i+2] == 'e' || text[i+2] == 'E') &&
 				(text[i+3] == '/') {
 				
-				// "t.me/" yakalandı, sonrasını kontrol et
 				rem := text[i+4:]
 				if len(rem) >= 8 && (rem[:8] == "joinchat" || rem[:8] == "JOINCHAT") {
 					return true
@@ -176,9 +176,7 @@ func isInviteLink(text string) bool {
 	return false
 }
 
-// OPTİMİZASYON 4: Sıcak TCP Bağlantısı ve Context Korumalı İstek
 func deleteMessage(token string, chatID int64, messageID int64) {
-	// Goroutine'in havada asılı kalmaması için 2 saniyelik sert timeout context'i
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -200,7 +198,33 @@ func deleteMessage(token string, chatID int64, messageID int64) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Global ve sıcak TCP bağlantısını kullanan client ile isteği atıyoruz
+	resp, err := httpClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+// --- GEÇİCİ TEST FONKSİYONU: ÖZELDEN CEVAP VERME ---
+func sendOkResponse(token string, chatID int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var urlBuf bytes.Buffer
+	urlBuf.WriteString("https://api.telegram.org/bot")
+	urlBuf.WriteString(token)
+	urlBuf.WriteString("/sendMessage")
+
+	var jsonBuf bytes.Buffer
+	jsonBuf.WriteString(`{"chat_id":`)
+	jsonBuf.WriteString(strconv.FormatInt(chatID, 10))
+	jsonBuf.WriteString(`,"text":"OK!"}`)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", urlBuf.String(), &jsonBuf)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := httpClient.Do(req)
 	if err == nil {
 		resp.Body.Close()
