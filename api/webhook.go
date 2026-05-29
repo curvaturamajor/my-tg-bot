@@ -2,16 +2,28 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"strconv"
 	"sync"
+	"time"
 	"unicode/utf16"
 )
 
 var targetUserIDs = []int64{7350150331, 987654321}
-// Her istek geldiğinde sıfırdan obje yaratıp GC'yi yormamak için nesneleri reuse ediyoruz.
+
+// OPTİMİZASYON 1: Global HTTP Client ve Bağlantı Havuzu Havuzu
+// MaxIdleConnsPerHost sayesinde Telegram sunucularıyla TCP bağlantısı hep sıcak tutulur.
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	},
+}
+
 var updatePool = sync.Pool{
 	New: func() interface{} {
 		return &Update{}
@@ -48,7 +60,6 @@ type Update struct {
 	Message *Message `json:"message,omitempty"`
 }
 
-// Vercel Native Giriş Noktası
 func Handler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -90,7 +101,7 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			if containsLink {
 				botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 				if botToken != "" {
-
+					// Arka plan goroutine'ine geçiyoruz
 					go deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
 				}
 			}
@@ -134,42 +145,48 @@ func getEntityText(msg *Message, offset, length int) string {
 	return ""
 }
 
-// ZERO-ALLOCATION LINK KONTROLÜ
-// strings.ToLower kullanmadan, heap allocation yapmadan case-insensitive ham kontrol yapar.
+// OPTİMİZASYON 3: Keskin Nokta Taramalı Zero-Allocation Link Kontrolü
 func isInviteLink(text string) bool {
-	if len(text) < 5 { // "t.me/+" minimum 6 karakterdir
+	n := len(text)
+	if n < 6 { 
 		return false
 	}
 
-	for i := 0; i <= len(text)-5; i++ {
-		// "t.me/" kontrolü (büyük/küçük harf esnek)
-		if (text[i] == 't' || text[i] == 'T') &&
-			(text[i+1] == '.') &&
-			(text[i+2] == 'm' || text[i+2] == 'M') &&
-			(text[i+3] == 'e' || text[i+3] == 'E') &&
-			(text[i+4] == '/') {
-			
-			// t.me/ kısmından sonrasına bakıyoruz
-			rem := text[i+5:]
-			if len(rem) >= 8 && (rem[:8] == "joinchat" || rem[:8] == "JOINCHAT") {
-				return true
-			}
-			if len(rem) > 0 && rem[0] == '+' {
-				return true
+	// Tüm string'i 5'erli bloklar halinde taramak yerine, önce '.' avlıyoruz.
+	// Bu işlemci seviyesindeki arama döngüsünü inanılmaz hızlandırır.
+	for i := 1; i < n-3; i++ {
+		if text[i] == '.' {
+			// Noktanın solunda 't' veya 'T', sağında 'm' ve 'e' var mı?
+			if (text[i-1] == 't' || text[i-1] == 'T') &&
+				(text[i+1] == 'm' || text[i+1] == 'M') &&
+				(text[i+2] == 'e' || text[i+2] == 'E') &&
+				(text[i+3] == '/') {
+				
+				// "t.me/" yakalandı, sonrasını kontrol et
+				rem := text[i+4:]
+				if len(rem) >= 8 && (rem[:8] == "joinchat" || rem[:8] == "JOINCHAT") {
+					return true
+				}
+				if len(rem) > 0 && rem[0] == '+' {
+					return true
+				}
 			}
 		}
 	}
 	return false
 }
-// EN HIZLI VE HAM HTTP POST ÇAĞRISI
+
+// OPTİMİZASYON 4: Sıcak TCP Bağlantısı ve Context Korumalı İstek
 func deleteMessage(token string, chatID int64, messageID int64) {
-	// String birleştirme maliyetini sıfırlamak için buffer optimizasyonu
+	// Goroutine'in havada asılı kalmaması için 2 saniyelik sert timeout context'i
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
 	var urlBuf bytes.Buffer
 	urlBuf.WriteString("https://api.telegram.org/bot")
 	urlBuf.WriteString(token)
 	urlBuf.WriteString("/deleteMessage")
 
-	// İsteğin gövdesini (payload) elle (manual) ve allocation yapmadan çiziyoruz
 	var jsonBuf bytes.Buffer
 	jsonBuf.WriteString(`{"chat_id":`)
 	jsonBuf.WriteString(strconv.FormatInt(chatID, 10))
@@ -177,7 +194,14 @@ func deleteMessage(token string, chatID int64, messageID int64) {
 	jsonBuf.WriteString(strconv.FormatInt(messageID, 10))
 	jsonBuf.WriteString(`}`)
 
-	resp, err := http.Post(urlBuf.String(), "application/json", &jsonBuf)
+	req, err := http.NewRequestWithContext(ctx, "POST", urlBuf.String(), &jsonBuf)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Global ve sıcak TCP bağlantısını kullanan client ile isteği atıyoruz
+	resp, err := httpClient.Do(req)
 	if err == nil {
 		resp.Body.Close()
 	}
