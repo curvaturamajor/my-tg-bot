@@ -13,9 +13,6 @@ import (
 )
 
 // --- YAPILANDIRMA ---
-// Botun DM üzerinden sadece seninle konuşabilmesi için Sahip ID'si
-const ownerID int64 = 7350150331
-
 // Gruplarda linkleri silinecek hedef kişilerin ID'leri
 var targetUserIDs = []int64{7350150331, 987654321}
 
@@ -92,16 +89,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	if update.Message != nil {
 		msg := update.Message
 
-		// 1. DURUM: ÖZEL MESAJ (DM) KONTROLÜ
-		// Güvenlik gereği sadece bot sahibinin DM komutları işleme alınır.
-		if msg.Chat.Type == "private" {
-			if msg.From != nil && msg.From.ID == ownerID {
-				if msg.Text == "/start" {
-					sendOkResponse(botToken, msg.Chat.ID)
-				}
-			}
-		} else if msg.Chat.Type == "group" || msg.Chat.Type == "supergroup" {
-			// 2. DURUM: GRUP İÇİ LİNK DENETİMİ
+		// GRUP İÇİ LİNK DENETİMİ (Yalnızca grup ve süpergruplar işlenir)
+		if msg.Chat.Type == "group" || msg.Chat.Type == "supergroup" {
 			if msg.From != nil {
 				userID := msg.From.ID
 
@@ -212,33 +201,6 @@ func deleteMessage(token string, chatID int64, messageID int64) {
 	jsonBuf.WriteString(`,"message_id":`)
 	jsonBuf.WriteString(strconv.FormatInt(messageID, 10))
 	jsonBuf.WriteString(`}`)
-
-	req, err := http.NewRequestWithContext(ctx, "POST", urlBuf.String(), &jsonBuf)
-	if err != nil {
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err == nil {
-		resp.Body.Close()
-	}
-}
-
-// Sadece bot sahibine cevap vermek için tutulan yardımcı fonksiyon
-func sendOkResponse(token string, chatID int64) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	var urlBuf bytes.Buffer
-	urlBuf.WriteString("https://api.telegram.org/bot")
-	urlBuf.WriteString(token)
-	urlBuf.WriteString("/sendMessage")
-
-	var jsonBuf bytes.Buffer
-	jsonBuf.WriteString(`{"chat_id":`)
-	jsonBuf.WriteString(strconv.FormatInt(chatID, 10))
-	jsonBuf.WriteString(`,"text":"Sistem Aktif ve Hazir!"}`)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", urlBuf.String(), &jsonBuf)
 	if err != nil {
