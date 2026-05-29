@@ -3,6 +3,10 @@ name = "tg-link-remover"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "webhook"
+path = "api/webhook.rs"
+
 [dependencies]
 vercel_runtime = "2.2.0"
 serde = { version = "1.0.228", features = ["derive"] }
