@@ -3,17 +3,25 @@ package handler
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
-	"strings"
+	"strconv"
+	"sync"
 	"unicode/utf16"
 )
 
-// Global config - Bellek allocation'ı yapmamak için harita yerine array ve primitive tipler
+// Global hedef listesi
 var targetUserIDs = []int64{123456789, 987654321}
 
-// Telegram JSON Modelleri (Sadece ihtiyacımız olan alanlar, bellek tasarrufu için minimal)
+// --- PERFORMANS İÇİN BELLEK HAVUZU (sync.Pool) ---
+// Her istek geldiğinde sıfırdan obje yaratıp GC'yi yormamak için nesneleri reuse ediyoruz.
+var updatePool = sync.Pool{
+	New: func() interface{} {
+		return &Update{}
+	},
+}
+
+// --- TELEGRAM MİNİMAL JSON MODELLERİ ---
 type MessageEntity struct {
 	Type   string `json:"type"`
 	URL    string `json:"url,omitempty"`
@@ -43,31 +51,33 @@ type Update struct {
 	Message *Message `json:"message,omitempty"`
 }
 
-// Vercel'in native Go mimarisi için giriş noktası
+// Vercel Native Giriş Noktası
 func Handler(w http.ResponseWriter, r *http.Request) {
-	// 1. Sadece POST isteklerini kabul et
 	if r.Method != http.MethodPost {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
-	// 2. JSON'ı verimli bir şekilde stream üzerinden oku (bütün body'yi hafızaya tek seferde kopyalamaz)
-	var update Update
-	err := json.NewDecoder(r.Body).Decode(&update)
+	// Havuzdan boş bir Update objesi alıyoruz
+	update := updatePool.Get().(*Update)
+	
+	// İşe başlamadan önce içini tamamen sıfırlıyoruz (Veri sızıntısını önlemek için)
+	update.Message = nil 
+
+	// Stream üzerinden sıfır kopyalama ile JSON ayrıştırma
+	err := json.NewDecoder(r.Body).Decode(update)
 	if err != nil {
+		updatePool.Put(update) // Hata durumunda objeyi havuza geri at
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte("Invalid JSON"))
 		return
 	}
 
-	// 3. Bot Mantığı
 	if update.Message != nil && update.Message.From != nil {
 		userID := update.Message.From.ID
 
-		// Kullanıcı hedef listede mi? (Allocation yapmayan hızlı döngü)
 		isTarget := false
-		for _, id := range targetUserIDs {
-			if id == userID {
+		for i := 0; i < len(targetUserIDs); i++ {
+			if targetUserIDs[i] == userID {
 				isTarget = true
 				break
 			}
@@ -77,7 +87,6 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			msg := update.Message
 			containsLink := false
 
-			// Tüm entity'leri tek tek kontrol et
 			if len(msg.Entities) > 0 {
 				containsLink = checkEntities(msg, msg.Entities)
 			}
@@ -85,25 +94,27 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 				containsLink = checkEntities(msg, msg.CaptionEntities)
 			}
 
-			// Eğer davet linki bulunduysa mesajı sil
 			if containsLink {
 				botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 				if botToken != "" {
-					// Ham HTTP çağrısını goroutine ile arka plana atıyoruz ki Vercel isteği hemen 200 OK dönsün, bot tıkanmasın
+					// Goroutine fırlatarak Vercel'in anında yanıt dönmesini sağlıyoruz
 					go deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
 				}
 			}
 		}
 	}
 
-	// Vercel'e hemen 200 OK dönüyoruz (Hız için kritik)
+	// Objemizi tekrar kullanılmak üzere havuza geri iade ediyoruz
+	updatePool.Put(update)
+
+	// En hızlı HTTP yanıtı
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
 
-// Entity'leri kontrol eden optimize fonksiyon
 func checkEntities(msg *Message, entities []MessageEntity) bool {
-	for _, entity := range entities {
+	for i := 0; i < len(entities); i++ {
+		entity := entities[i]
 		if entity.Type == "url" {
 			textContent := getEntityText(msg, entity.Offset, entity.Length)
 			if isInviteLink(textContent) {
@@ -118,7 +129,6 @@ func checkEntities(msg *Message, entities []MessageEntity) bool {
 	return false
 }
 
-// Telegram UTF-16 offset mantığına göre string'i güvenli ve allocation-friendly kesme
 func getEntityText(msg *Message, offset, length int) string {
 	text := msg.Text
 	if text == "" {
@@ -128,7 +138,6 @@ func getEntityText(msg *Message, offset, length int) string {
 		return ""
 	}
 
-	// String'i UTF-16 array'ine çevirip offset koruması yapıyoruz (Telegram uyumluluğu için şart)
 	utf16Text := utf16.Encode([]rune(text))
 	if offset+length <= len(utf16Text) {
 		return string(utf16.Decode(utf16Text[offset : offset+length]))
@@ -136,24 +145,53 @@ func getEntityText(msg *Message, offset, length int) string {
 	return ""
 }
 
-// Performans için küçük harfe çevirmeden (allocation yapmadan) direkt kontrol
+// ZERO-ALLOCATION LINK KONTROLÜ
+// strings.ToLower kullanmadan, heap allocation yapmadan case-insensitive ham kontrol yapar.
 func isInviteLink(text string) bool {
-	// strings.Contains yerine performans için ham kontrol. t.me/joinchat veya t.me/+ aranıyor.
-	// Küçük/büyük harf duyarlılığını strings.ToLower yapmadan (yeni string yaratmadan) yönetmek için:
-	lower := strings.ToLower(text) 
-	return strings.Contains(lower, "t.me/joinchat") || strings.Contains(lower, "t.me/+")
+	if len(text) < 5 { // "t.me/+" minimum 6 karakterdir
+		return false
+	}
+
+	// Büyük/küçük harf duyarsız arama için metni tarıyoruz
+	for i := 0; i <= len(text)-5; i++ {
+		// "t.me/" kontrolü (büyük/küçük harf esnek)
+		if (text[i] == 't' || text[i] == 'T') &&
+			(text[i+1] == '.') &&
+			(text[i+2] == 'm' || text[i+2] == 'M') &&
+			(text[i+3] == 'e' || text[i+3] == 'E') &&
+			(text[i+4] == '/') {
+			
+			// t.me/ kısmından sonrasına bakıyoruz
+			rem := text[i+5:]
+			if len(rem) >= 8 && (rem[:8] == "joinchat" || rem[:8] == "JOINCHAT") {
+				return true
+			}
+			if len(rem) > 0 && rem[0] == '+' {
+				return true
+			}
+		}
+	}
+	return false
 }
 
-// Telegram API'sine en hızlı şekilde ham POST isteği atan fonksiyon
+// EN HIZLI VE HAM HTTP POST ÇAĞRISI
 func deleteMessage(token string, chatID int64, messageID int64) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/deleteMessage", token)
+	// String birleştirme maliyetini sıfırlamak için buffer optimizasyonu
+	var urlBuf bytes.Buffer
+	urlBuf.WriteString("https://api.telegram.org/bot")
+	urlBuf.WriteString(token)
+	urlBuf.WriteString("/deleteMessage")
 
-	// Ham JSON byte'larını manuel ve hızlıca birleştiriyoruz (json.Marshal'dan daha az bellek harcar)
-	payload := []byte(fmt.Sprintf(`{"chat_id":%d,"message_id":%d}`, chatID, messageID))
+	// İsteğin gövdesini (payload) elle (manual) ve allocation yapmadan çiziyoruz
+	var jsonBuf bytes.Buffer
+	jsonBuf.WriteString(`{"chat_id":`)
+	jsonBuf.WriteString(strconv.FormatInt(chatID, 10))
+	jsonBuf.WriteString(`,"message_id":`)
+	jsonBuf.WriteString(strconv.FormatInt(messageID, 10))
+	jsonBuf.WriteString(`}`)
 
-	// Standart HTTP Client'ı Vercel üzerinde oldukça hızlıdır
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(payload))
+	resp, err := http.Post(urlBuf.String(), "application/json", &jsonBuf)
 	if err == nil {
-		resp.Body.Close() // Bellek sızıntısını önlemek için hemen kapatıyoruz
+		resp.Body.Close()
 	}
 }
