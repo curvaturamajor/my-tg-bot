@@ -1,10 +1,14 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
-use vercel_runtime::{run, Body, Error, Request, Response, StatusCode};
+// 2.x sürümünde Body ve StatusCode artık 'vercel_runtime::http' altından gelir
+use vercel_runtime::{
+    http::{Body, StatusCode},
+    run, Error, Request, Response,
+};
 
 // --- KONFİGÜRASYON ---
 // Engellemek istediğiniz kişilerin Telegram ID numaraları
-const TARGET_USER_IDS: &[i64] = &[7350150331, 987654321]; 
+const TARGET_USER_IDS: &[i64] = &[123456789, 987654321]; 
 
 // --- TELEGRAM JSON MODELLERİ ---
 #[derive(Deserialize, Debug)]
@@ -61,7 +65,7 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
         Err(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Body::Text("Invalid JSON".into()))?);
+                .body(Body::from("Invalid JSON"))?); // 2.x mimarisine uygun Body oluşturma
         }
     };
 
@@ -78,7 +82,7 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
 
                 // 2. Adım: Entity türlerini ve içeriklerini kontrol et
                 for entity in all_entities {
-                    // Durum A: Direkt text olarak "t.me/+" veya "t.me/joinchat" yazılmışsa (text_link veya url)
+                    // Durum A: Direkt text olarak "t.me/+" veya "t.me/joinchat" yazılmışsa (url)
                     if entity.entity_type == "url" {
                         if let Some(text_content) = get_entity_text(&msg, entity.offset, entity.length) {
                             if is_invite_link(&text_content) {
@@ -120,23 +124,19 @@ pub async fn handler(req: Request) -> Result<Response<Body>, Error> {
     // Vercel serverless fonksiyonunun başarıyla sonlanması için 200 OK dönüyoruz
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .body(Body::Text("OK".into()))?)
+        .body(Body::from("OK"))?) // 2.x mimarisine uygun Body oluşturma
 }
 
 /// Gelen URL veya metnin Telegram davet linki formatında olup olmadığını kontrol eder.
 fn is_invite_link(text: &str) -> bool {
     let lower = text.to_lowercase();
-    // t.me/joinchat veya t.me/+ formatındaki davet linklerini yakalar
     lower.contains("t.me/joinchat") || lower.contains("t.me/+")
 }
 
 /// UTF-16 tabanlı Telegram offset değerlerine göre metinden ilgili entity kısmını güvenli bir şekilde keser.
 fn get_entity_text(msg: &Message, offset: usize, length: usize) -> Option<String> {
-    // Öncelik text alanındadır, yoksa caption alanına bakılır
     let target_text = msg.text.as_ref().or(msg.caption.as_ref())?;
     
-    // Telegram offsetleri UTF-16 karakter dizilimine göredir. Rust ise UTF-8 kullanır.
-    // Emoji ve özel karakterlerde kayma olmaması için UTF-16'ya çevirip kesiyoruz.
     let utf16: Vec<u16> = target_text.encode_utf16().collect();
     if offset + length <= utf16.len() {
         String::from_utf16(&utf16[offset..offset + length]).ok()
