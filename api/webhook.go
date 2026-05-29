@@ -10,10 +10,7 @@ import (
 	"unicode/utf16"
 )
 
-// Global hedef listesi
-var targetUserIDs = []int64{123456789, 987654321}
-
-// --- PERFORMANS İÇİN BELLEK HAVUZU (sync.Pool) ---
+var targetUserIDs = []int64{7350150331, 987654321}
 // Her istek geldiğinde sıfırdan obje yaratıp GC'yi yormamak için nesneleri reuse ediyoruz.
 var updatePool = sync.Pool{
 	New: func() interface{} {
@@ -58,16 +55,12 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Havuzdan boş bir Update objesi alıyoruz
-	update := updatePool.Get().(*Update)
-	
-	// İşe başlamadan önce içini tamamen sıfırlıyoruz (Veri sızıntısını önlemek için)
+	update := updatePool.Get().(*Update)	
 	update.Message = nil 
 
-	// Stream üzerinden sıfır kopyalama ile JSON ayrıştırma
 	err := json.NewDecoder(r.Body).Decode(update)
 	if err != nil {
-		updatePool.Put(update) // Hata durumunda objeyi havuza geri at
+		updatePool.Put(update)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -97,17 +90,13 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 			if containsLink {
 				botToken := os.Getenv("TELEGRAM_BOT_TOKEN")
 				if botToken != "" {
-					// Goroutine fırlatarak Vercel'in anında yanıt dönmesini sağlıyoruz
+
 					go deleteMessage(botToken, msg.Chat.ID, msg.MessageID)
 				}
 			}
 		}
 	}
-
-	// Objemizi tekrar kullanılmak üzere havuza geri iade ediyoruz
 	updatePool.Put(update)
-
-	// En hızlı HTTP yanıtı
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
@@ -152,7 +141,6 @@ func isInviteLink(text string) bool {
 		return false
 	}
 
-	// Büyük/küçük harf duyarsız arama için metni tarıyoruz
 	for i := 0; i <= len(text)-5; i++ {
 		// "t.me/" kontrolü (büyük/küçük harf esnek)
 		if (text[i] == 't' || text[i] == 'T') &&
@@ -173,7 +161,6 @@ func isInviteLink(text string) bool {
 	}
 	return false
 }
-
 // EN HIZLI VE HAM HTTP POST ÇAĞRISI
 func deleteMessage(token string, chatID int64, messageID int64) {
 	// String birleştirme maliyetini sıfırlamak için buffer optimizasyonu
